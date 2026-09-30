@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './styles.css'
 
-const API = (import.meta.env.VITE_API_URL || 'https://quick-credit-api.onrender.com').replace(/\/$/, '')
+const API = (import.meta.env.VITE_API_URL || 'http://localhost:4000').replace(/\/$/, '')
 const TOKEN_KEY = 'quick_credit_token'
 
 const money = (value) =>
@@ -304,9 +304,14 @@ function VerificationScreen({ onLogout }) {
   )
 }
 
-function AppShell({ user, onLogout, children, admin = false }) {
+function AppShell({ user, onLogout, children, admin = false, activeNav = 'overview', onNavigate }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const initials = `${user.firstName?.[0] || ''}${user.lastName?.[0] || ''}`.toUpperCase()
+
+  const navigate = (page) => {
+    if (onNavigate) onNavigate(page)
+    setMenuOpen(false)
+  }
 
   return (
     <div className="app-shell">
@@ -321,9 +326,15 @@ function AppShell({ user, onLogout, children, admin = false }) {
 
         <nav className="side-nav">
           <span className="nav-label">Workspace</span>
-          <div className="nav-item active"><span>⌂</span>{admin ? 'Overview' : 'My dashboard'}</div>
-          <div className="nav-item"><span>▣</span>{admin ? 'Loan applications' : 'My loans'}</div>
-          <div className="nav-item"><span>◷</span>{admin ? 'Repayments' : 'Payment history'}</div>
+          <button type="button" className={`nav-item ${activeNav === 'overview' ? 'active' : ''}`} onClick={() => navigate('overview')}>
+            <span>⌂</span>{admin ? 'Overview' : 'My dashboard'}
+          </button>
+          <button type="button" className={`nav-item ${activeNav === 'loans' ? 'active' : ''}`} onClick={() => navigate('loans')}>
+            <span>▣</span>{admin ? 'Loan applications' : 'My loans'}
+          </button>
+          <button type="button" className={`nav-item ${activeNav === 'repayments' ? 'active' : ''}`} onClick={() => navigate('repayments')}>
+            <span>◷</span>{admin ? 'Repayments' : 'Payment history'}
+          </button>
         </nav>
 
         <div className="sidebar-footer">
@@ -770,11 +781,14 @@ function RepaymentModal({ loan, onClose, onDone }) {
 function AdminDashboard({ user, onLogout }) {
   const [loans, setLoans] = useState([])
   const [tab, setTab] = useState('all')
+  const [page, setPage] = useState('overview')
   const [selected, setSelected] = useState(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [repaidLoans, setRepaidLoans] = useState([])
+  const [repaymentLoading, setRepaymentLoading] = useState(false)
 
   const loadLoans = useCallback(async (silent = false) => {
     if (silent) setRefreshing(true)
@@ -792,7 +806,37 @@ function AdminDashboard({ user, onLogout }) {
     }
   }, [])
 
+  const loadRepayments = useCallback(async () => {
+    setRepaymentLoading(true)
+    setError('')
+    try {
+      const [currentResponse, repaidResponse] = await Promise.allSettled([
+        api('/api/v1/admin/loans'),
+        api('/api/v1/admin/repaid/loans'),
+      ])
+
+      if (currentResponse.status === 'fulfilled') {
+        setLoans(currentResponse.value?.data?.result || [])
+      }
+      if (repaidResponse.status === 'fulfilled') {
+        setRepaidLoans(repaidResponse.value?.data?.result || [])
+      } else if (repaidResponse.reason?.status === 404) {
+        setRepaidLoans([])
+      } else {
+        throw repaidResponse.reason
+      }
+    } catch (requestError) {
+      setError(errorMessage(requestError))
+    } finally {
+      setRepaymentLoading(false)
+    }
+  }, [])
+
   useEffect(() => { loadLoans() }, [loadLoans])
+
+  useEffect(() => {
+    if (page === 'repayments') loadRepayments()
+  }, [page, loadRepayments])
 
   const filtered = useMemo(
     () => (tab === 'all' ? loans : loans.filter((loan) => loan.status === tab)),
@@ -807,6 +851,8 @@ function AdminDashboard({ user, onLogout }) {
     completed: loans.filter((loan) => loan.status === 'completed').length,
   }
 
+  const activeRepayments = loans.filter((loan) => loan.status === 'approved' && Number(loan.balance) > 0)
+
   const updateLoan = (loanId, patch) => {
     setLoans((current) => current.map((loan) => (
       String(loan.loanId) === String(loanId) ? { ...loan, ...patch } : loan
@@ -818,96 +864,129 @@ function AdminDashboard({ user, onLogout }) {
     window.setTimeout(() => setNotice(''), 3500)
   }
 
+  const openLoan = (loan) => setSelected(loan)
+
   return (
-    <AppShell user={user} onLogout={onLogout} admin>
+    <AppShell
+      user={user}
+      onLogout={onLogout}
+      admin
+      activeNav={page}
+      onNavigate={setPage}
+    >
       <main className="content">
         <section className="welcome-row">
           <div>
             <div className="eyebrow">Operations workspace</div>
-            <h1>Loan operations, at a glance.</h1>
-            <p>Review applications, manage approvals and monitor repayments.</p>
+            <h1>{page === 'repayments' ? 'Repayments and collections.' : page === 'loans' ? 'Loan applications.' : 'Loan operations, at a glance.'}</h1>
+            <p>{page === 'repayments' ? 'Monitor outstanding balances and completed repayments.' : page === 'loans' ? 'Review, verify and manage every loan application.' : 'Review applications, manage approvals and monitor repayments.'}</p>
           </div>
-          <button className="secondary-button" onClick={() => loadLoans(true)} disabled={refreshing}>
-            {refreshing ? 'Refreshing…' : '↻ Refresh data'}
+          <button
+            className="secondary-button"
+            onClick={() => page === 'repayments' ? loadRepayments() : loadLoans(true)}
+            disabled={refreshing || repaymentLoading}
+          >
+            {(refreshing || repaymentLoading) ? 'Refreshing…' : '↻ Refresh data'}
           </button>
         </section>
 
         {error && <Alert type="error">{error}</Alert>}
         {notice && <Alert type="success">{notice}</Alert>}
 
-        <section className="metrics-grid">
-          <Metric label="All applications" value={counts.all} icon="▣" />
-          <Metric label="Pending review" value={counts.pending} icon="◷" />
-          <Metric label="Approved" value={counts.approved} icon="✓" />
-          <Metric label="Completed" value={counts.completed} icon="↗" />
-        </section>
+        {page === 'repayments' ? (
+          <RepaymentsPanel
+            activeLoans={activeRepayments}
+            repaidLoans={repaidLoans}
+            loading={repaymentLoading}
+            onManage={openLoan}
+          />
+        ) : (
+          <>
+            <section className="metrics-grid">
+              <Metric label="All applications" value={counts.all} icon="▣" />
+              <Metric label="Pending review" value={counts.pending} icon="◷" />
+              <Metric label="Approved" value={counts.approved} icon="✓" />
+              <Metric label="Completed" value={counts.completed} icon="↗" />
+            </section>
 
-        <section className="panel">
-          <PanelHeader title="Loan applications" subtitle="Review every loan returned by the Quick Credit API." />
-          <div className="filter-tabs">
-            {Object.keys(counts).map((status) => (
-              <button
-                key={status}
-                className={tab === status ? 'active' : ''}
-                onClick={() => setTab(status)}
-              >
-                {status === 'all' ? 'All' : status[0].toUpperCase() + status.slice(1)}
-                <span>{counts[status]}</span>
-              </button>
-            ))}
-          </div>
+            {page === 'overview' && (
+              <section className="panel">
+                <PanelHeader
+                  title="Recent loan applications"
+                  subtitle="Use Loan applications in the sidebar for the complete management view."
+                  action={<button className="secondary-button" onClick={() => setPage('loans')}>Open applications</button>}
+                />
+                {loading ? <TableSkeleton /> : loans.length === 0 ? (
+                  <EmptyState icon="▣" title="No applications found" text="There are no loans available right now." />
+                ) : (
+                  <div className="table-scroll">
+                    <table>
+                      <thead><tr><th>Customer</th><th>Loan</th><th>Status</th><th>Balance</th><th>Action</th></tr></thead>
+                      <tbody>
+                        {loans.slice(0, 5).map((loan) => (
+                          <tr key={String(loan.loanId)}>
+                            <td><div className="customer-cell"><div className="mini-avatar">{loan.firstName?.[0]?.toUpperCase() || '?'}</div><div><strong>{loan.firstName}</strong><span>{loan.email}</span></div></div></td>
+                            <td><strong>{money(loan.totalAmount)}</strong><span className="table-sub">#{String(loan.loanId).slice(-8).toUpperCase()}</span></td>
+                            <td><Badge value={loan.status} /></td>
+                            <td><strong>{money(loan.balance)}</strong></td>
+                            <td><button className="small-button" onClick={() => openLoan(loan)}>Manage</button></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
+            )}
 
-          {loading ? (
-            <TableSkeleton />
-          ) : filtered.length === 0 ? (
-            <EmptyState icon="▣" title="No applications found" text="There are no loans in this view right now." />
-          ) : (
-            <div className="table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Customer</th>
-                    <th>Loan</th>
-                    <th>Status</th>
-                    <th>Total due</th>
-                    <th>Balance</th>
-                    <th>Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filtered.map((loan) => (
-                    <tr key={String(loan.loanId)}>
-                      <td>
-                        <div className="customer-cell">
-                          <div className="mini-avatar">{loan.firstName?.[0]?.toUpperCase() || '?'}</div>
-                          <div><strong>{loan.firstName}</strong><span>{loan.email}</span></div>
-                        </div>
-                      </td>
-                      <td>
-                        <strong>{money(loan.totalAmount)}</strong>
-                        <span className="table-sub">#{String(loan.loanId).slice(-8).toUpperCase()}</span>
-                      </td>
-                      <td><Badge value={loan.status} /></td>
-                      <td>{money(loan.totalAmount)}</td>
-                      <td><strong>{money(loan.balance)}</strong></td>
-                      <td><button className="small-button" onClick={() => setSelected(loan.loanId)}>Manage</button></td>
-                    </tr>
+            {page === 'loans' && (
+              <section className="panel">
+                <PanelHeader title="Loan applications" subtitle="Review every loan returned by the Quick Credit API." />
+                <div className="filter-tabs">
+                  {Object.keys(counts).map((status) => (
+                    <button key={status} className={tab === status ? 'active' : ''} onClick={() => setTab(status)}>
+                      {status === 'all' ? 'All' : status[0].toUpperCase() + status.slice(1)}
+                      <span>{counts[status]}</span>
+                    </button>
                   ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </section>
+                </div>
+                {loading ? <TableSkeleton /> : filtered.length === 0 ? (
+                  <EmptyState icon="▣" title="No applications found" text="There are no loans in this view right now." />
+                ) : (
+                  <div className="table-scroll">
+                    <table>
+                      <thead><tr><th>Customer</th><th>Loan</th><th>Status</th><th>Total due</th><th>Balance</th><th>Action</th></tr></thead>
+                      <tbody>
+                        {filtered.map((loan) => (
+                          <tr key={String(loan.loanId)}>
+                            <td><div className="customer-cell"><div className="mini-avatar">{loan.firstName?.[0]?.toUpperCase() || '?'}</div><div><strong>{loan.firstName}</strong><span>{loan.email}</span></div></div></td>
+                            <td><strong>{money(loan.totalAmount)}</strong><span className="table-sub">#{String(loan.loanId).slice(-8).toUpperCase()}</span></td>
+                            <td><Badge value={loan.status} /></td>
+                            <td>{money(loan.totalAmount)}</td>
+                            <td><strong>{money(loan.balance)}</strong></td>
+                            <td><button className="small-button" onClick={() => openLoan(loan)}>Manage</button></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
+            )}
+          </>
+        )}
       </main>
 
       {selected && (
         <AdminLoanModal
-          loanId={selected}
+          loanId={selected.loanId}
+          userId={selected.userId}
           onClose={() => setSelected(null)}
           onChanged={(patch, message) => {
-            updateLoan(selected, patch)
+            updateLoan(selected.loanId, patch)
             if (message) notify(message)
             loadLoans(true)
+            if (page === 'repayments') loadRepayments()
           }}
         />
       )}
@@ -915,7 +994,60 @@ function AdminDashboard({ user, onLogout }) {
   )
 }
 
-function AdminLoanModal({ loanId, onClose, onChanged }) {
+function RepaymentsPanel({ activeLoans, repaidLoans, loading, onManage }) {
+  if (loading) return <section className="panel"><PanelHeader title="Repayments" subtitle="Loading repayment records…" /><TableSkeleton /></section>
+
+  return (
+    <>
+      <section className="metrics-grid">
+        <Metric label="Outstanding loans" value={activeLoans.length} icon="◷" />
+        <Metric label="Outstanding balance" value={money(activeLoans.reduce((sum, loan) => sum + Number(loan.balance || 0), 0))} icon="₦" />
+        <Metric label="Completed repayments" value={repaidLoans.length} icon="✓" />
+        <Metric label="Repaid endpoint" value="Connected" icon="↗" />
+      </section>
+
+      <section className="panel">
+        <PanelHeader title="Outstanding repayments" subtitle="Approved loans that still have a balance." />
+        {activeLoans.length === 0 ? (
+          <EmptyState icon="✓" title="No outstanding repayments" text="There are no approved loans with an outstanding balance." />
+        ) : (
+          <div className="table-scroll">
+            <table>
+              <thead><tr><th>Customer</th><th>Loan</th><th>Status</th><th>Balance</th><th>Action</th></tr></thead>
+              <tbody>
+                {activeLoans.map((loan) => (
+                  <tr key={String(loan.loanId)}>
+                    <td><div className="customer-cell"><div className="mini-avatar">{loan.firstName?.[0]?.toUpperCase() || '?'}</div><div><strong>{loan.firstName}</strong><span>{loan.email}</span></div></div></td>
+                    <td><strong>{money(loan.totalAmount)}</strong><span className="table-sub">#{String(loan.loanId).slice(-8).toUpperCase()}</span></td>
+                    <td><Badge value={loan.status} /></td>
+                    <td><strong>{money(loan.balance)}</strong></td>
+                    <td><button className="small-button" onClick={() => onManage(loan)}>Manage repayment</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <section className="panel">
+        <PanelHeader title="Completed repayments" subtitle="Records returned by the Quick Credit repaid-loans endpoint." />
+        {repaidLoans.length === 0 ? (
+          <EmptyState compact icon="✓" title="No completed repayments" text="The backend has not returned any completed loans yet." />
+        ) : (
+          <div className="table-scroll">
+            <table>
+              <thead><tr><th>Loan</th><th>Status</th><th>Balance</th></tr></thead>
+              <tbody>{repaidLoans.map((loan) => <tr key={String(loan.loanId)}><td><strong>#{String(loan.loanId).slice(-8).toUpperCase()}</strong></td><td><Badge value={loan.status} /></td><td>{money(Number(loan.balance || 0) / 100)}</td></tr>)}</tbody>
+            </table>
+          </div>
+        )}
+      </section>
+    </>
+  )
+}
+
+function AdminLoanModal({ loanId, userId, onClose, onChanged }) {
   const [loan, setLoan] = useState(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -932,6 +1064,25 @@ function AdminLoanModal({ loanId, onClose, onChanged }) {
   }, [loanId])
 
   useEffect(() => { load() }, [load])
+
+  const verifyCustomer = async () => {
+    if (!userId) {
+      setError('Customer ID is missing from the loan record. Refresh the loan applications and try again.')
+      return
+    }
+    setBusy(true)
+    setError('')
+    try {
+      const response = await api(`/api/v1/admin/${userId}/verify-user`, { method: 'PATCH' })
+      const verifiedStatus = response?.data?.result?.status || 'verified'
+      setLoan((current) => current ? { ...current, userStatus: verifiedStatus } : current)
+      onChanged({}, 'Customer verified successfully.')
+    } catch (requestError) {
+      setError(errorMessage(requestError))
+    } finally {
+      setBusy(false)
+    }
+  }
 
   const changeStatus = async (status) => {
     setBusy(true)
@@ -995,6 +1146,14 @@ function AdminLoanModal({ loanId, onClose, onChanged }) {
             <Detail label="Total repayment" value={money(loan.totalAmount)} />
             <Detail label="Amount repaid" value={money(loan.repay)} />
           </div>
+
+          {String(loan.userStatus).toLowerCase() !== 'verified' && (
+            <div className="admin-actions">
+              <button className="primary-button" disabled={busy} onClick={verifyCustomer}>
+                {busy ? 'Verifying…' : 'Verify customer'}
+              </button>
+            </div>
+          )}
 
           {loan.loanStatus === 'pending' && (
             <div className="admin-actions">
