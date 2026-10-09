@@ -106,6 +106,10 @@ function App() {
 
   if (booting) return <LoadingScreen />
 
+  if (window.location.pathname === '/verify-email') {
+    return <EmailVerificationPage />
+  }
+
   if (!token) {
     return <AuthScreen onLogin={handleLogin} error={authError} />
   }
@@ -171,7 +175,7 @@ function AuthScreen({ onLogin, error }) {
           }),
         })
         setMode('signin')
-        setMessage('Account created. Sign in to continue.')
+        setMessage('Account created. Check your inbox for the Quick Credit verification email. Open the verification link before signing in. If you cannot find it, check your spam or junk folder.')
         setForm((current) => ({ ...current, password: '' }))
       } else {
         const response = await api('/api/v1/auth/signin', {
@@ -287,6 +291,50 @@ function Field({ name, label, type = 'text', value, onChange, ...props }) {
   )
 }
 
+function EmailVerificationPage() {
+  const [status, setStatus] = useState('verifying')
+  const [message, setMessage] = useState('')
+
+  useEffect(() => {
+    const token = new URLSearchParams(window.location.search).get('token')
+
+    if (!token) {
+      setStatus('error')
+      setMessage('This verification link is missing its token.')
+      return
+    }
+
+    api(`/api/v1/verify-email?token=${encodeURIComponent(token)}`)
+      .then(() => {
+        setStatus('success')
+        setMessage('Your email has been verified successfully. You can now sign in to Quick Credit.')
+      })
+      .catch((error) => {
+        setStatus('error')
+        setMessage(errorMessage(error))
+      })
+  }, [])
+
+  if (status === 'verifying') return <LoadingScreen label="Verifying your email address…" />
+
+  return (
+    <div className="loading-screen">
+      <div className="status-card">
+        <div className="status-icon">{status === 'success' ? '✓' : '!'}</div>
+        <div className="eyebrow">Email verification</div>
+        <h1>{status === 'success' ? 'Email verified' : 'Verification failed'}</h1>
+        <p>{message}</p>
+        <button className="primary-button" onClick={() => {
+          localStorage.removeItem(TOKEN_KEY)
+          window.location.href = '/'
+        }}>
+          {status === 'success' ? 'Continue to sign in' : 'Back to sign in'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function VerificationScreen({ onLogout }) {
   return (
     <div className="loading-screen">
@@ -377,6 +425,10 @@ function CustomerDashboard({ user, onLogout }) {
   const [error, setError] = useState('')
   const [showLoan, setShowLoan] = useState(false)
   const [selectedLoan, setSelectedLoan] = useState(null)
+  const [page, setPage] = useState('overview')
+  const [paymentHistory, setPaymentHistory] = useState([])
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [historyError, setHistoryError] = useState('')
 
   const loadLoans = useCallback(async (silent = false) => {
     if (silent) setRefreshing(true)
@@ -398,6 +450,43 @@ function CustomerDashboard({ user, onLogout }) {
 
   useEffect(() => { loadLoans() }, [loadLoans])
 
+  const loadPaymentHistory = useCallback(async () => {
+    setHistoryLoading(true)
+    setHistoryError('')
+
+    try {
+      const responses = await Promise.allSettled(
+        loans.map((loan) => api(`/api/v1/loan/${loan.loanId}/payment-history`))
+      )
+
+      const history = responses.flatMap((response, index) => (
+        response.status === 'fulfilled'
+          ? (response.value?.data?.result || []).map((payment) => ({
+              ...payment,
+              loanId: loans[index].loanId,
+            }))
+          : []
+      ))
+
+      const failed = responses.some((response) => response.status === 'rejected')
+      if (failed && history.length === 0 && loans.length > 0) {
+        throw responses.find((response) => response.status === 'rejected')?.reason
+      }
+
+      setPaymentHistory(history.sort(
+        (a, b) => new Date(b.createdAt || b.date || 0) - new Date(a.createdAt || a.date || 0)
+      ))
+    } catch (requestError) {
+      setHistoryError(errorMessage(requestError))
+    } finally {
+      setHistoryLoading(false)
+    }
+  }, [loans])
+
+  useEffect(() => {
+    if (page === 'repayments') loadPaymentHistory()
+  }, [page, loadPaymentHistory])
+
   const activeLoan = loans.find((loan) => loan.status === 'approved' && Number(loan.balance) > 0)
   const totalOutstanding = loans.reduce((sum, loan) => sum + Number(loan.balance || 0), 0)
   const totalBorrowed = loans.reduce((sum, loan) => sum + Number(loan.loanAmount || 0), 0)
@@ -414,7 +503,12 @@ function CustomerDashboard({ user, onLogout }) {
   }
 
   return (
-    <AppShell user={user} onLogout={onLogout}>
+    <AppShell
+      user={user}
+      onLogout={onLogout}
+      activeNav={page}
+      onNavigate={setPage}
+    >
       <main className="content">
         <section className="welcome-row">
           <div>
@@ -427,6 +521,63 @@ function CustomerDashboard({ user, onLogout }) {
 
         {error && <Alert type="error">{error}</Alert>}
 
+        {page === 'loans' ? (
+          <section className="panel">
+            <PanelHeader
+              title="My loans"
+              subtitle={loans.length ? `${loans.length} loan application${loans.length === 1 ? '' : 's'} in your account` : 'Your loan applications will appear here'}
+              action={<button className="secondary-button" onClick={() => loadLoans(true)} disabled={refreshing}>{refreshing ? 'Refreshing…' : 'Refresh'}</button>}
+            />
+            {loading ? <ListSkeleton /> : loans.length === 0 ? (
+              <EmptyState
+                icon="₦"
+                title="No loan applications yet"
+                text="You have not submitted a loan application yet."
+                action={<button className="primary-button" onClick={() => setShowLoan(true)}>Start an application</button>}
+              />
+            ) : (
+              <div className="loan-list">
+                {loans.map((loan) => (
+                  <CustomerLoanCard
+                    key={String(loan.loanId)}
+                    loan={loan}
+                    onRepay={() => setSelectedLoan(loan)}
+                    onView={() => setSelectedLoan({ ...loan, historyOnly: true })}
+                  />
+                ))}
+              </div>
+            )}
+          </section>
+        ) : page === 'repayments' ? (
+          <section className="panel">
+            <PanelHeader
+              title="Payment history"
+              subtitle="Repayments recorded against your loans."
+              action={<button className="secondary-button" onClick={loadPaymentHistory} disabled={historyLoading}>{historyLoading ? 'Refreshing…' : 'Refresh'}</button>}
+            />
+            {historyError && <Alert type="error">{historyError}</Alert>}
+            {historyLoading ? <TableSkeleton /> : paymentHistory.length === 0 ? (
+              <EmptyState compact icon="◷" title="No payment history" text="Repayment records will appear here after a payment is recorded." />
+            ) : (
+              <div className="table-scroll">
+                <table>
+                  <thead><tr><th>Loan</th><th>Amount</th><th>Date</th><th>Status</th></tr></thead>
+                  <tbody>
+                    {paymentHistory.map((payment, index) => (
+                      <tr key={String(payment._id || payment.id || `${payment.loanId}-${index}`)}>
+                        <td><strong>#{String(payment.loanId).slice(-8).toUpperCase()}</strong></td>
+                        <td><strong>{money(payment.amount ?? payment.loanRepayment ?? payment.repayment ?? 0)}</strong></td>
+                        <td>{dateTime(payment.createdAt || payment.date)}</td>
+                        <td><Badge value={payment.status || 'completed'} /></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        ) : (
+          <>
         <section className="metrics-grid">
           <Metric label="Outstanding balance" value={money(totalOutstanding)} icon="₦" />
           <Metric label="Total borrowed" value={money(totalBorrowed)} icon="↗" />
@@ -477,6 +628,9 @@ function CustomerDashboard({ user, onLogout }) {
             <div className="account-detail"><span>Active loan</span><strong>{activeLoan ? money(activeLoan.balance) : 'None'}</strong></div>
           </div>
         </section>
+          </>
+        )}
+
       </main>
 
       {showLoan && (
